@@ -137,6 +137,8 @@ function SwarmSession() {
   const physicsIntervalRef = useRef(null);
   const [nearOption, setNearOption] = useState(null); // Index of the nearest option
   const [isSettling, setIsSettling] = useState(false); // Whether the puck is settling on an option
+  const [isLocked, setIsLocked] = useState(false); // New state to completely lock the puck
+
 
   
   // Calculate relative positions for the options (hexagonal arrangement)
@@ -300,8 +302,7 @@ function SwarmSession() {
     publishPuckPosition({ x: 50, y: 50 }, { x: 0, y: 0 });
   };
 
-  // 2. Modify the physics simulation to better handle boundaries
-  // Modify the physics calculation in your useEffect
+  // Modify the physics simulation to better handle boundaries
   useEffect(() => {
     if (!session || result) return;
     
@@ -313,16 +314,24 @@ function SwarmSession() {
     
     const startPhysicsSimulation = () => {
       physicsIntervalRef.current = setInterval(() => {
+        // If puck is locked to an option, skip physics calculations
+        if (isLocked) return;
+        
         setPuckPosition(currentPos => {
-          setPuckVelocity(currentVel => {
-            // If settling, apply strong damping to velocity
-            if (isSettling) {
+          // If settling or locked, don't update position
+          if (isSettling) {
+            // If settling but not locked, gradually move to option
+            if (nearOption !== null && optionPositions[nearOption]) {
+              const option = optionPositions[nearOption];
               return {
-                x: currentVel.x * 0.7,
-                y: currentVel.y * 0.7
+                x: currentPos.x * 0.8 + option.x * 0.2, // Faster convergence
+                y: currentPos.y * 0.8 + option.y * 0.2
               };
             }
-            
+            return currentPos;
+          }
+          
+          setPuckVelocity(currentVel => {
             const newVel = { ...currentVel };
             
             // Apply forces from all magnets
@@ -388,13 +397,6 @@ function SwarmSession() {
             y: currentPos.y + puckVelocity.y
           };
           
-          // If settling, gradually move puck toward the option
-          if (isSettling && nearOption !== null && optionPositions[nearOption]) {
-            const option = optionPositions[nearOption];
-            newPos.x = newPos.x * 0.9 + option.x * 0.1;
-            newPos.y = newPos.y * 0.9 + option.y * 0.1;
-          }
-          
           // Boundary handling
           if (newPos.x < 5) {
             newPos.x = 5;
@@ -413,7 +415,7 @@ function SwarmSession() {
             setPuckVelocity(v => ({ ...v, y: -Math.abs(v.y) * 0.5 }));
           }
           
-          // Check if puck is "lost" (moving too fast or out of bounds)
+          // Check if puck is "lost"
           const isLost = 
             newPos.x < 0 || newPos.x > 100 || 
             newPos.y < 0 || newPos.y > 100 ||
@@ -444,7 +446,7 @@ function SwarmSession() {
         clearInterval(physicsIntervalRef.current);
       }
     };
-  }, [session, magnetPosition, otherMagnets, result, nearOption, isSettling, optionPositions]);
+  }, [session, magnetPosition, otherMagnets, result, nearOption, isSettling, isLocked, optionPositions]);
 
   // Handle mouse/touch movement
   const handleMouseMove = (e) => {
@@ -494,9 +496,9 @@ function SwarmSession() {
     }
   };
 
-  // Check if the puck has settled on a decision
+  // Update the checkForDecision function
   const checkForDecision = (puckPos) => {
-    if (!session || !optionPositions.length || result) return;
+    if (!session || !optionPositions.length || result || isLocked) return;
     
     // Find the closest option
     let closestOptionIndex = -1;
@@ -524,9 +526,21 @@ function SwarmSession() {
       if (minDistance < DECISION_THRESHOLD && !isSettling) {
         setIsSettling(true);
         
+        // Immediately lock the puck to the option position
+        setIsLocked(true);
+        
+        // Snap the puck directly to the option's position
+        setPuckPosition({
+          x: optionPositions[closestOptionIndex].x,
+          y: optionPositions[closestOptionIndex].y
+        });
+        
+        // Set velocity to zero
+        setPuckVelocity({ x: 0, y: 0 });
+        
         // After a short delay, finalize the decision
         setTimeout(() => {
-          finalizeDecision(closestOptionIndex, minDistance);
+          finalizeDecision(closestOptionIndex, 0); // Distance is 0 since we snapped to option
         }, 1000); // 1 second delay for visual feedback
       }
     } else {
