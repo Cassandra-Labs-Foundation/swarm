@@ -106,6 +106,20 @@ const BrainpowerFill = styled.div`
   transition: width 0.5s ease;
 `;
 
+const ResetButton = styled.button`
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  background-color: #e74c3c;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  z-index: 20;
+`;
+
 function SwarmSession() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
@@ -121,6 +135,9 @@ function SwarmSession() {
   const [loading, setLoading] = useState(true);
   const userId = localStorage.getItem('swarmUserId');
   const physicsIntervalRef = useRef(null);
+  const [nearOption, setNearOption] = useState(null); // Index of the nearest option
+  const [isSettling, setIsSettling] = useState(false); // Whether the puck is settling on an option
+
   
   // Calculate relative positions for the options (hexagonal arrangement)
   useEffect(() => {
@@ -272,18 +289,40 @@ function SwarmSession() {
     };
   }, [sessionId, userId]);
 
-  // Physics simulation
+  // Add these modifications to your SwarmSession component
+
+  // 1. Add a function to reset the puck to the center
+  const resetPuck = () => {
+    setPuckPosition({ x: 50, y: 50 });
+    setPuckVelocity({ x: 0, y: 0 });
+    
+    // Also publish the reset position to the database
+    publishPuckPosition({ x: 50, y: 50 }, { x: 0, y: 0 });
+  };
+
+  // 2. Modify the physics simulation to better handle boundaries
+  // Modify the physics calculation in your useEffect
   useEffect(() => {
     if (!session || result) return;
     
     const MASS = 10;
-    const FRICTION = 0.95;
+    const FRICTION = 0.96;
     const FORCE_MULTIPLIER = 0.5;
+    const MAX_VELOCITY = 5;
+    const OPTION_ATTRACTION = 2.0; // Force coefficient for option attraction
     
     const startPhysicsSimulation = () => {
       physicsIntervalRef.current = setInterval(() => {
         setPuckPosition(currentPos => {
           setPuckVelocity(currentVel => {
+            // If settling, apply strong damping to velocity
+            if (isSettling) {
+              return {
+                x: currentVel.x * 0.7,
+                y: currentVel.y * 0.7
+              };
+            }
+            
             const newVel = { ...currentVel };
             
             // Apply forces from all magnets
@@ -311,6 +350,19 @@ function SwarmSession() {
               }
             });
             
+            // If near an option, add attraction force to it
+            if (nearOption !== null && optionPositions[nearOption]) {
+              const option = optionPositions[nearOption];
+              const dx = option.x - currentPos.x;
+              const dy = option.y - currentPos.y;
+              const distance = Math.sqrt(dx * dx + dy * dy);
+              
+              if (distance > 0) {
+                forces.x += (dx / distance) * OPTION_ATTRACTION;
+                forces.y += (dy / distance) * OPTION_ATTRACTION;
+              }
+            }
+            
             // Calculate acceleration
             const ax = forces.x / MASS;
             const ay = forces.y / MASS;
@@ -318,6 +370,14 @@ function SwarmSession() {
             // Update velocity
             newVel.x = (newVel.x + ax) * FRICTION;
             newVel.y = (newVel.y + ay) * FRICTION;
+            
+            // Apply velocity cap to prevent extreme speeds
+            const velocityMagnitude = Math.sqrt(newVel.x * newVel.x + newVel.y * newVel.y);
+            if (velocityMagnitude > MAX_VELOCITY) {
+              const scale = MAX_VELOCITY / velocityMagnitude;
+              newVel.x *= scale;
+              newVel.y *= scale;
+            }
             
             return newVel;
           });
@@ -328,22 +388,40 @@ function SwarmSession() {
             y: currentPos.y + puckVelocity.y
           };
           
-          // Keep the puck within bounds
-          if (newPos.x < 0) {
-            newPos.x = 0;
-            setPuckVelocity(v => ({ ...v, x: -v.x * 0.5 }));
+          // If settling, gradually move puck toward the option
+          if (isSettling && nearOption !== null && optionPositions[nearOption]) {
+            const option = optionPositions[nearOption];
+            newPos.x = newPos.x * 0.9 + option.x * 0.1;
+            newPos.y = newPos.y * 0.9 + option.y * 0.1;
           }
-          if (newPos.x > 100) {
-            newPos.x = 100;
-            setPuckVelocity(v => ({ ...v, x: -v.x * 0.5 }));
+          
+          // Boundary handling
+          if (newPos.x < 5) {
+            newPos.x = 5;
+            setPuckVelocity(v => ({ ...v, x: Math.abs(v.x) * 0.5 }));
           }
-          if (newPos.y < 0) {
-            newPos.y = 0;
-            setPuckVelocity(v => ({ ...v, y: -v.y * 0.5 }));
+          if (newPos.x > 95) {
+            newPos.x = 95;
+            setPuckVelocity(v => ({ ...v, x: -Math.abs(v.x) * 0.5 }));
           }
-          if (newPos.y > 100) {
-            newPos.y = 100;
-            setPuckVelocity(v => ({ ...v, y: -v.y * 0.5 }));
+          if (newPos.y < 5) {
+            newPos.y = 5;
+            setPuckVelocity(v => ({ ...v, y: Math.abs(v.y) * 0.5 }));
+          }
+          if (newPos.y > 95) {
+            newPos.y = 95;
+            setPuckVelocity(v => ({ ...v, y: -Math.abs(v.y) * 0.5 }));
+          }
+          
+          // Check if puck is "lost" (moving too fast or out of bounds)
+          const isLost = 
+            newPos.x < 0 || newPos.x > 100 || 
+            newPos.y < 0 || newPos.y > 100 ||
+            Number.isNaN(newPos.x) || Number.isNaN(newPos.y);
+          
+          if (isLost) {
+            console.log("Puck was lost, resetting to center");
+            return { x: 50, y: 50 };
           }
           
           // Check if puck has settled near an option
@@ -366,7 +444,7 @@ function SwarmSession() {
         clearInterval(physicsIntervalRef.current);
       }
     };
-  }, [session, magnetPosition, otherMagnets, result]);
+  }, [session, magnetPosition, otherMagnets, result, nearOption, isSettling, optionPositions]);
 
   // Handle mouse/touch movement
   const handleMouseMove = (e) => {
@@ -420,32 +498,40 @@ function SwarmSession() {
   const checkForDecision = (puckPos) => {
     if (!session || !optionPositions.length || result) return;
     
-    // Velocity threshold for "settled" state
-    const velocityMagnitude = Math.sqrt(
-      puckVelocity.x * puckVelocity.x + 
-      puckVelocity.y * puckVelocity.y
-    );
+    // Find the closest option
+    let closestOptionIndex = -1;
+    let minDistance = Infinity;
     
-    if (velocityMagnitude < 0.05) {
-      // Find the closest option
-      let closestOptionIndex = -1;
-      let minDistance = Infinity;
+    optionPositions.forEach((option, index) => {
+      const dx = option.x - puckPos.x;
+      const dy = option.y - puckPos.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
       
-      optionPositions.forEach((option, index) => {
-        const dx = option.x - puckPos.x;
-        const dy = option.y - puckPos.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        if (distance < minDistance) {
-          minDistance = distance;
-          closestOptionIndex = index;
-        }
-      });
-      
-      // If puck is close enough to an option, consider it a decision
-      if (minDistance < 15 && closestOptionIndex >= 0) {
-        finalizeDecision(closestOptionIndex, minDistance);
+      if (distance < minDistance) {
+        minDistance = distance;
+        closestOptionIndex = index;
       }
+    });
+    
+    // If puck is close enough to an option, begin settling process
+    const ATTRACTION_THRESHOLD = 20; // Distance at which option begins attracting puck
+    const DECISION_THRESHOLD = 8;    // Distance at which a decision is considered final
+    
+    if (minDistance < ATTRACTION_THRESHOLD && closestOptionIndex >= 0) {
+      setNearOption(closestOptionIndex);
+      
+      // If very close, start the settling process
+      if (minDistance < DECISION_THRESHOLD && !isSettling) {
+        setIsSettling(true);
+        
+        // After a short delay, finalize the decision
+        setTimeout(() => {
+          finalizeDecision(closestOptionIndex, minDistance);
+        }, 1000); // 1 second delay for visual feedback
+      }
+    } else {
+      setNearOption(null);
+      setIsSettling(false);
     }
   };
 
@@ -555,16 +641,9 @@ function SwarmSession() {
             }}
           />
           
-          {Object.entries(otherMagnets).map(([id, position]) => (
-            <UserMagnet
-              key={id}
-              style={{
-                left: `${position.x}%`,
-                top: `${position.y}%`,
-                backgroundColor: '#9b59b6' // Different color for other users
-              }}
-            />
-          ))}
+          <ResetButton onClick={resetPuck}>
+            Reset Puck
+          </ResetButton>
         </SwarmArena>
       )}
     </SwarmContainer>
